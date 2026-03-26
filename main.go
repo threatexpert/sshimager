@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"sshimager/protocol"
 )
 
 func printUsage() {
@@ -16,13 +18,16 @@ Usage:
   sshimager <user@host>:/dev/sdX [options]     Specify disk directly
 
 Options:
+  -p <port>            SSH port (default: 22)
   -o <file>            Output file (.vmdk .vhd .vdi .dd)
   -f <format>          Force format: vmdk, vhd, vdi, dd
   -i                   Interactive mode (TUI for partition selection)
+  --agent              Use agent mode (faster, ZSTD compression)
+  --compress <mode>    Agent compression: zstd-fast (default), zstd, none
   --exclude <N,...>    Exclude partition numbers
   --used-only <N,...>  Used-only mode for partitions (bitmap-aware)
   --used-only-all      Used-only for all supported partitions
-  --buf-size <MB>      IO buffer size (default: 8)
+  --buf-size <MB>      IO buffer size (default: 4 agent, 8 sftp)
 
 Note: Network interruptions during transfer are handled automatically.
       The tool will retry reconnecting indefinitely until the transfer completes.
@@ -30,6 +35,7 @@ Note: Network interruptions during transfer are handled automatically.
 Examples:
   sshimager root@192.168.1.50 -i
   sshimager root@192.168.1.50:/dev/sda -o server.vmdk -i
+  sshimager root@192.168.1.50 -p 2222 -o server.vmdk --agent
   sshimager root@192.168.1.50:/dev/sda -o server.vmdk --exclude 3 --used-only 1,2
   sshimager user@host -o backup.vhd --used-only-all
 
@@ -38,9 +44,12 @@ Examples:
 
 func main() {
 	var (
+		sshPort     int
 		output      string
 		formatStr   string
 		interactive bool
+		useAgent    bool
+		compressStr string
 		excludeStr  string
 		usedOnlyStr string
 		usedOnlyAll bool
@@ -48,13 +57,16 @@ func main() {
 	)
 
 	fs := flag.NewFlagSet("sshimager", flag.ExitOnError)
+	fs.IntVar(&sshPort, "p", 22, "SSH port")
 	fs.StringVar(&output, "o", "", "Output file")
 	fs.StringVar(&formatStr, "f", "", "Force format")
 	fs.BoolVar(&interactive, "i", false, "Interactive mode")
+	fs.BoolVar(&useAgent, "agent", false, "Use agent mode")
+	fs.StringVar(&compressStr, "compress", "zstd-fast", "Compression: zstd-fast, zstd, none")
 	fs.StringVar(&excludeStr, "exclude", "", "Exclude partitions")
 	fs.StringVar(&usedOnlyStr, "used-only", "", "Used-only partitions")
 	fs.BoolVar(&usedOnlyAll, "used-only-all", false, "Used-only for all")
-	fs.IntVar(&bufMB, "buf-size", 8, "Buffer size in MB")
+	fs.IntVar(&bufMB, "buf-size", 0, "Buffer size in MB (default: 4 agent, 8 sftp)")
 	fs.Usage = printUsage
 
 	if len(os.Args) < 2 {
@@ -98,16 +110,15 @@ func main() {
 	}
 
 	// ── Step 1: Connect ──
-	conn, err := NewSSHConn(userHost)
+	conn, err := NewSSHConn(userHost, sshPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	defer conn.Close()
 
 	// ── Step 2: Select disk ──
+	// Disk selection always uses SSH commands (works before backend is set up)
 	if devPath == "" {
-		// No disk specified — list disks and let user choose
 		fmt.Fprintf(os.Stderr, "Discovering remote disks...\n")
 		disks, err := conn.ListDisks()
 		if err != nil {
@@ -121,28 +132,77 @@ func main() {
 		}
 
 		if len(disks) == 1 {
-			// Only one disk, auto-select
 			devPath = disks[0].Dev
 			fmt.Fprintf(os.Stderr, "Auto-selected: %s (%s, %s)\n",
 				devPath, disks[0].Model, FormatSize(disks[0].Size))
 		} else {
-			// Multiple disks — TUI selection
 			devPath = TUIDiskSelect(disks, userHost)
 			if devPath == "" {
 				fmt.Fprintf(os.Stderr, "Cancelled.\n")
 				os.Exit(0)
 			}
 		}
-		interactive = true // after disk selection, go interactive for partition config
+		interactive = true
 	}
 
-	// ── Step 3: Open disk ──
-	if err := conn.OpenDisk(devPath); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	// ── Step 3: Create backend and prepare disk ──
+	// Apply default buf-size based on backend
+	if bufMB == 0 {
+		if useAgent {
+			bufMB = 4
+		} else {
+			bufMB = 8
+		}
+	}
+
+	var backend DiskBackend
+	if useAgent {
+		fmt.Fprintf(os.Stderr, "Setting up agent backend...\n")
+		ab, err := NewAgentBackend(conn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		defer ab.Close()
+
+		// Set compression mode
+		switch strings.ToLower(compressStr) {
+		case "none":
+			ab.CompressMode = protocol.CompressNone
+			fmt.Fprintf(os.Stderr, "Compression: none\n")
+		case "zstd-fast":
+			ab.CompressMode = protocol.CompressZSTDFast
+			fmt.Fprintf(os.Stderr, "Compression: zstd-fast\n")
+		default:
+			ab.CompressMode = protocol.CompressZSTD
+			fmt.Fprintf(os.Stderr, "Compression: zstd\n")
+		}
+
+		// Agent handles prepare+open in one command
+		if err := ab.PrepareDisk(devPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		backend = ab
+	} else {
+		// SFTP mode: set up SFTP subsystem, then backend
+		if err := conn.SetupSFTP(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		sftpBackend := NewSFTPBackend(conn)
+		defer sftpBackend.Close()
+
+		conn.PrepareDisk(devPath)
+		if err := conn.OpenDisk(devPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		backend = sftpBackend
 	}
 
 	// ── Step 4: Scan partitions ──
+	// Partition scanning uses SSH commands + disk reads via backend
 	fmt.Fprintf(os.Stderr, "Scanning partitions on %s...\n", devPath)
 	diskSize, err := conn.GetDiskSize()
 	if err != nil {
@@ -150,7 +210,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	disk, err := ScanPartitions(conn, diskSize, devPath)
+	disk, err := ScanPartitions(backend, diskSize, devPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -205,7 +265,7 @@ func main() {
 	// ── Step 6: Image ──
 	regions := BuildRegions(disk)
 	cfg := &ImagingConfig{
-		Conn:    conn,
+		Backend: backend,
 		Disk:    disk,
 		Output:  output,
 		Format:  format,

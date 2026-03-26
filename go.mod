@@ -4,6 +4,7 @@ go 1.24.4
 
 require (
 	github.com/gdamore/tcell/v2 v2.8.1
+	github.com/klauspost/compress v1.18.5
 	github.com/pkg/sftp v1.13.6
 	github.com/rivo/tview v0.42.0
 	golang.org/x/crypto v0.23.0

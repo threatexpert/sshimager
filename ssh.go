@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,19 +17,19 @@ import (
 
 // SSHConn manages the SSH connection and provides SFTP access to remote disk
 type SSHConn struct {
-	Host       string // hostname:port
-	User       string
-	DevPath    string // /dev/sda
+	Host    string // hostname:port
+	User    string
+	DevPath string // /dev/sda
 
 	sshClient  *ssh.Client
 	sftpClient *sftp.Client
 	diskFile   *sftp.File
 
 	// Credentials for reconnect
-	password    string
-	sudoPass    string
-	authMethod  ssh.AuthMethod
-	isRoot      bool
+	password   string
+	sudoPass   string
+	authMethod ssh.AuthMethod
+	isRoot     bool
 
 	// sudo sftp-server session
 	sudoSession *ssh.Session
@@ -37,17 +38,15 @@ type SSHConn struct {
 }
 
 // NewSSHConn creates and connects to the remote host (without opening a disk).
-func NewSSHConn(userHost string) (*SSHConn, error) {
-	// Parse user@host:port
+func NewSSHConn(userHost string, port int) (*SSHConn, error) {
+	// Parse user@host
 	user := "root"
 	host := userHost
 	if at := strings.Index(userHost, "@"); at >= 0 {
 		user = userHost[:at]
 		host = userHost[at+1:]
 	}
-	if !strings.Contains(host, ":") {
-		host = host + ":22"
-	}
+	host = fmt.Sprintf("%s:%d", host, port)
 
 	conn := &SSHConn{
 		Host: host,
@@ -83,8 +82,8 @@ func (c *SSHConn) getCredentials() error {
 
 func (c *SSHConn) connect() error {
 	config := &ssh.ClientConfig{
-		User: c.User,
-		Auth: []ssh.AuthMethod{c.authMethod},
+		User:            c.User,
+		Auth:            []ssh.AuthMethod{c.authMethod},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         15 * time.Second,
 	}
@@ -100,26 +99,30 @@ func (c *SSHConn) connect() error {
 	// Check if we're root
 	c.isRoot, _ = c.checkRoot()
 
-	if !c.isRoot {
-		fmt.Fprintf(os.Stderr, "Not root. Setting up sudo sftp-server...\n")
-		if err := c.setupSudoSFTP(); err != nil {
-			client.Close()
-			return err
-		}
-	} else {
-		// Standard SFTP subsystem with large packet size for throughput
-		sftpClient, err := sftp.NewClient(client,
-			sftp.MaxPacketChecked(32*1024),
-			sftp.MaxConcurrentRequestsPerFile(64),
-		)
-		if err != nil {
-			client.Close()
-			return fmt.Errorf("SFTP init failed: %w", err)
-		}
-		c.sftpClient = sftpClient
+	// Default sudo password to SSH password (most common case)
+	if !c.isRoot && c.sudoPass == "" {
+		c.sudoPass = c.password
 	}
 
 	fmt.Fprintf(os.Stderr, "Connected to %s@%s\n", c.User, c.Host)
+	return nil
+}
+
+// SetupSFTP initializes the SFTP subsystem. Only needed for SFTP backend mode.
+func (c *SSHConn) SetupSFTP() error {
+	if !c.isRoot {
+		fmt.Fprintf(os.Stderr, "Not root. Setting up sudo sftp-server...\n")
+		return c.setupSudoSFTP()
+	}
+	// Standard SFTP subsystem with large packet size for throughput
+	sftpClient, err := sftp.NewClient(c.sshClient,
+		sftp.MaxPacketChecked(32*1024),
+		sftp.MaxConcurrentRequestsPerFile(64),
+	)
+	if err != nil {
+		return fmt.Errorf("SFTP init failed: %w", err)
+	}
+	c.sftpClient = sftpClient
 	return nil
 }
 
@@ -168,10 +171,10 @@ func (c *SSHConn) setupSudoSFTP() error {
 func (c *SSHConn) findSFTPServer() (string, error) {
 	// Common paths
 	paths := []string{
-		"/usr/libexec/openssh/sftp-server",  // RHEL/CentOS
-		"/usr/lib/openssh/sftp-server",       // Debian/Ubuntu
-		"/usr/lib/ssh/sftp-server",           // Arch
-		"/usr/libexec/sftp-server",           // FreeBSD
+		"/usr/libexec/openssh/sftp-server", // RHEL/CentOS
+		"/usr/lib/openssh/sftp-server",     // Debian/Ubuntu
+		"/usr/lib/ssh/sftp-server",         // Arch
+		"/usr/libexec/sftp-server",         // FreeBSD
 	}
 
 	session, err := c.sshClient.NewSession()
@@ -259,6 +262,18 @@ func (c *SSHConn) launchSudoSFTP(sftpPath string) error {
 	c.sudoStdout = stdout
 	c.sftpClient = sftpClient
 
+	return nil
+}
+
+// PrepareDisk flushes OS caches and device buffers before imaging.
+// Runs: sync && blockdev --flushbufs <dev>; sync
+func (c *SSHConn) PrepareDisk(devPath string) error {
+	fmt.Fprintf(os.Stderr, "Preparing disk %s (sync + flushbufs)...\n", devPath)
+	cmd := fmt.Sprintf("sh -c 'sync && blockdev --flushbufs %s; sync'", devPath)
+	_, err := c.ExecCommandSudo(cmd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: disk prepare failed: %v (continuing anyway)\n", err)
+	}
 	return nil
 }
 
@@ -424,9 +439,10 @@ func (c *SSHConn) ExecCommandSudo(cmd string) (string, error) {
 	return c.ExecCommand(fmt.Sprintf("echo '%s' | sudo -S %s 2>/dev/null", c.sudoPass, cmd))
 }
 
-// Reconnect re-establishes the SSH connection using saved credentials
+// Reconnect re-establishes the SSH connection using saved credentials.
+// Only reconnects SSH itself — SFTP and disk reopen are handled by each backend.
 func (c *SSHConn) Reconnect() error {
-	fmt.Fprintf(os.Stderr, "\nReconnecting...\n")
+	fmt.Fprintf(os.Stderr, "\nReconnecting SSH...\n")
 	c.closeInternal()
 
 	// Retry with backoff
@@ -442,31 +458,23 @@ func (c *SSHConn) Reconnect() error {
 			}
 			return fmt.Errorf("reconnect failed after %d attempts: %w", len(delays), err)
 		}
-		// Re-open disk device
-		if c.DevPath != "" {
-			if err := c.OpenDisk(c.DevPath); err != nil {
-				if i < len(delays)-1 {
-					fmt.Fprintf(os.Stderr, "Failed to reopen disk: %v\n", err)
-					continue
-				}
-				return fmt.Errorf("reconnect: cannot reopen disk: %w", err)
-			}
-		}
-		fmt.Fprintf(os.Stderr, "Reconnected successfully.\n")
+		fmt.Fprintf(os.Stderr, "SSH reconnected.\n")
 		return nil
 	}
 	return fmt.Errorf("reconnect exhausted")
 }
 
-// IsNetworkError checks if an error is likely a network disconnection
+// IsNetworkError checks if an error is likely a network disconnection.
+// Uses errors.Is/As to handle wrapped errors from streaming protocol.
 func IsNetworkError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if err == io.EOF || err == io.ErrUnexpectedEOF {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
-	if _, ok := err.(*net.OpError); ok {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
 		return true
 	}
 	s := err.Error()

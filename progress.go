@@ -6,31 +6,44 @@ import (
 	"time"
 )
 
-const Version = "1.6.0"
+const Version = "1.7.1"
 
-var lastProgressTime time.Time
+var (
+	lastProgressTime    time.Time
+	lastProgressWritten uint64
+	instantSpeed        float64 // MB/s, smoothed
+)
 
 func printProgress(done, total, dataWritten uint64, tStart time.Time) {
 	now := time.Now()
-	if now.Sub(lastProgressTime) < time.Second {
+	dt := now.Sub(lastProgressTime).Seconds()
+	if dt < 1.0 {
 		return // throttle to 1Hz
 	}
-	lastProgressTime = now
 
-	elapsed := now.Sub(tStart).Seconds()
-	speed := float64(0)
-	if elapsed > 0.5 {
-		speed = float64(dataWritten) / elapsed / 1048576
+	// Instantaneous speed from bytes written since last update
+	if dt > 0 {
+		delta := dataWritten - lastProgressWritten
+		cur := float64(delta) / dt / 1048576
+		if instantSpeed == 0 {
+			instantSpeed = cur
+		} else {
+			// Exponential moving average (α=0.3) for smooth display
+			instantSpeed = instantSpeed*0.7 + cur*0.3
+		}
 	}
+	lastProgressTime = now
+	lastProgressWritten = dataWritten
+
 	pct := float64(0)
 	if total > 0 {
 		pct = float64(done) / float64(total) * 100
 	}
 
-	// ETA
+	// ETA based on instantaneous speed
 	eta := ""
-	if speed > 0 && pct > 0 && pct < 100 {
-		remain := float64(total-done) / (speed * 1048576)
+	if instantSpeed > 0.1 && pct > 0 && pct < 100 {
+		remain := float64(total-done) / (instantSpeed * 1048576)
 		if remain < 60 {
 			eta = fmt.Sprintf(" ETA %ds", int(remain))
 		} else if remain < 3600 {
@@ -41,8 +54,15 @@ func printProgress(done, total, dataWritten uint64, tStart time.Time) {
 	}
 
 	fmt.Fprintf(os.Stderr, "\r  %s / %s  (%.1f%%)  %.0f MB/s  data: %s%s    ",
-		FormatSize(done), FormatSize(total), pct, speed,
+		FormatSize(done), FormatSize(total), pct, instantSpeed,
 		FormatSize(dataWritten), eta)
+}
+
+// ResetProgress resets the instantaneous speed tracker (call after reconnect).
+func ResetProgress() {
+	lastProgressTime = time.Time{}
+	lastProgressWritten = 0
+	instantSpeed = 0
 }
 
 func FormatSize(bytes uint64) string {
