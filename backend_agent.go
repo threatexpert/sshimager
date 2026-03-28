@@ -364,6 +364,12 @@ func (ab *AgentBackend) GetBitmap(partOffset, partSize uint64, fsType FSType, de
 		fsByte = protocol.FSSwap
 	case FSLVM:
 		fsByte = protocol.FSLVM
+	case FSFat32:
+		fsByte = protocol.FSFat32
+	case FSNTFS:
+		fsByte = protocol.FSNTFS
+	case FSFat16:
+		fsByte = protocol.FSFat16
 	default:
 		return nil, fmt.Errorf("agent bitmap: unsupported fs %s", fsType)
 	}
@@ -406,7 +412,7 @@ func (ab *AgentBackend) GetBitmap(partOffset, partSize uint64, fsType FSType, de
 // StreamCopyRegion sends a single CmdStreamRead and reads the pushed response stream,
 // writing each chunk to vw. Returns the number of bytes actually received (for resume).
 func (ab *AgentBackend) StreamCopyRegion(vw VDiskWriter, offset, length uint64, chunkSize uint32,
-	prog *Progress, diskSize uint64, tStart time.Time) error {
+	prog *Progress, tStart time.Time) error {
 
 	ab.pingMu.Lock()
 	err := protocol.WriteStreamReadReq(ab.writer, &protocol.StreamReadReq{
@@ -448,7 +454,7 @@ func (ab *AgentBackend) StreamCopyRegion(vw VDiskWriter, offset, length uint64, 
 			curOff += n
 			prog.TotalDone += n
 			prog.DataWritten += n
-			printProgress(prog.TotalDone, diskSize, prog.DataWritten, tStart)
+			printProgress(prog.TotalDone, prog.TotalWork, prog.DataWritten, tStart)
 
 		case protocol.StatusCompressed:
 			compressed := make([]byte, hdr.CompLen)
@@ -466,7 +472,7 @@ func (ab *AgentBackend) StreamCopyRegion(vw VDiskWriter, offset, length uint64, 
 			curOff += n
 			prog.TotalDone += n
 			prog.DataWritten += n
-			printProgress(prog.TotalDone, diskSize, prog.DataWritten, tStart)
+			printProgress(prog.TotalDone, prog.TotalWork, prog.DataWritten, tStart)
 
 		case protocol.StatusZero:
 			// Zero region — sparse skip
@@ -477,7 +483,7 @@ func (ab *AgentBackend) StreamCopyRegion(vw VDiskWriter, offset, length uint64, 
 			curOff += n
 			prog.TotalDone += n
 			prog.DataWritten += n
-			printProgress(prog.TotalDone, diskSize, prog.DataWritten, tStart)
+			printProgress(prog.TotalDone, prog.TotalWork, prog.DataWritten, tStart)
 
 		case protocol.StatusError:
 			msg := make([]byte, hdr.CompLen)

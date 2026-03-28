@@ -21,6 +21,7 @@ const (
 	FSSwap
 	FSFat32
 	FSNTFS
+	FSFat16
 )
 
 func (f FSType) String() string {
@@ -43,12 +44,14 @@ func (f FSType) String() string {
 		return "fat32"
 	case FSNTFS:
 		return "ntfs"
+	case FSFat16:
+		return "fat16"
 	}
 	return "unknown"
 }
 
 func (f FSType) SupportsBitmap() bool {
-	return f == FSExt2 || f == FSExt3 || f == FSExt4 || f == FSXFS || f == FSLVM || f == FSSwap
+	return f == FSExt2 || f == FSExt3 || f == FSExt4 || f == FSXFS || f == FSLVM || f == FSSwap || f == FSFat32 || f == FSNTFS || f == FSFat16
 }
 
 // PartTable type
@@ -349,9 +352,19 @@ func DetectFS(r io.ReaderAt, partOffset uint64) (FSType, string) {
 		}
 	}
 
-	// FAT32
-	if buf[510] == 0x55 && buf[511] == 0xAA && string(buf[82:90]) == "FAT32   " {
-		return FSFat32, ""
+	// FAT family: check boot signature + filesystem type strings
+	if buf[510] == 0x55 && buf[511] == 0xAA {
+		// FAT32: BS_FilSysType at offset 82
+		if string(buf[82:90]) == "FAT32   " {
+			label := strings.TrimRight(string(buf[71:82]), " \x00")
+			return FSFat32, label
+		}
+		// FAT16/FAT12: BS_FilSysType at offset 54
+		fsType54 := string(buf[54:62])
+		if fsType54 == "FAT16   " || fsType54 == "FAT12   " || fsType54 == "FAT     " {
+			label := strings.TrimRight(string(buf[43:54]), " \x00")
+			return FSFat16, label
+		}
 	}
 
 	// NTFS

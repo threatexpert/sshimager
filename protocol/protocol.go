@@ -40,6 +40,9 @@ const (
 	FSBtrfs   byte = 5
 	FSLVM     byte = 6
 	FSSwap    byte = 7
+	FSFat32   byte = 8
+	FSNTFS    byte = 9
+	FSFat16   byte = 10
 )
 
 // Handshake: client and agent exchange [4B magic][2B version]

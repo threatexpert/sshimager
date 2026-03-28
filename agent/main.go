@@ -358,6 +358,12 @@ func handleBitmap(w *bufio.Writer, zenc *zstd.Encoder, disk *os.File, req *proto
 		bitmapBits, blockSize, totalBlocks, err = readXFSBitmap(disk, req.PartOffset, req.PartSize)
 	case protocol.FSLVM:
 		bitmapBits, blockSize, totalBlocks, err = readLVMBitmap(disk, req.PartOffset, req.PartSize, req.DevPath)
+	case protocol.FSFat32:
+		bitmapBits, blockSize, totalBlocks, err = readFat32Bitmap(disk, req.PartOffset, req.PartSize)
+	case protocol.FSNTFS:
+		bitmapBits, blockSize, totalBlocks, err = readNTFSBitmap(disk, req.PartOffset, req.PartSize)
+	case protocol.FSFat16:
+		bitmapBits, blockSize, totalBlocks, err = readFat16Bitmap(disk, req.PartOffset, req.PartSize)
 	case protocol.FSSwap:
 		blockSize = 4096
 		totalBlocks = req.PartSize / uint64(blockSize)

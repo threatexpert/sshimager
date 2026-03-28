@@ -29,6 +29,12 @@ func (b *SFTPBackend) GetBitmap(partOffset, partSize uint64, fsType FSType, devP
 		return XFSReadBitmap(b.conn, partOffset, partSize)
 	case FSLVM:
 		return LVMBuildBitmap(b.conn, partOffset, partSize, devPath)
+	case FSFat32:
+		return Fat32ReadBitmap(b.conn, partOffset, partSize)
+	case FSFat16:
+		return Fat16ReadBitmap(b.conn, partOffset, partSize)
+	case FSNTFS:
+		return NTFSReadBitmap(b.conn, partOffset, partSize)
 	case FSSwap:
 		// Swap has no meaningful bitmap; caller handles this case
 		return nil, fmt.Errorf("swap partitions have no bitmap")

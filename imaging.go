@@ -23,6 +23,7 @@ const (
 
 type Progress struct {
 	TotalDone   uint64
+	TotalWork   uint64 // estimated total bytes of real work (adjusted as bitmaps resolve)
 	DataWritten uint64
 }
 
@@ -118,7 +119,7 @@ func RunImaging(cfg *ImagingConfig) error {
 	fmt.Fprintf(os.Stderr, "Creating %s image: %s\n", cfg.Format, cfg.Output)
 	tStart := time.Now()
 	buf := make([]byte, bufSize)
-	prog := &Progress{}
+	prog := &Progress{TotalWork: cfg.Disk.Size}
 
 	for _, region := range cfg.Regions {
 		switch region.Type {
@@ -128,13 +129,12 @@ func RunImaging(cfg *ImagingConfig) error {
 			if err := vw.WriteZero(region.Offset, region.Length); err != nil {
 				return err
 			}
-			prog.TotalDone += region.Length
+			prog.TotalWork -= region.Length
 
 		case RegionCopy:
 			pname := regionName(cfg.Disk, &region)
 			fmt.Fprintf(os.Stderr, "  Copying %s: %s ...\n", pname, FormatSize(region.Length))
-			if err := copyRegion(cfg.Backend, vw, region.Offset, region.Length, buf, prog,
-				cfg.Disk.Size, tStart); err != nil {
+			if err := copyRegion(cfg.Backend, vw, region.Offset, region.Length, buf, prog, tStart); err != nil {
 				return err
 			}
 
@@ -145,8 +145,7 @@ func RunImaging(cfg *ImagingConfig) error {
 			p := &cfg.Disk.Partitions[region.PartIdx]
 			fmt.Fprintf(os.Stderr, "  Partition #%d %s %s: used-only %s ...\n",
 				p.Number, p.FSType, p.Mountpoint, FormatSize(region.Length))
-			if err := copyUsedOnly(cfg.Backend, vw, p, buf, prog,
-				cfg.Disk.Size, tStart); err != nil {
+			if err := copyUsedOnly(cfg.Backend, vw, p, buf, prog, tStart); err != nil {
 				return err
 			}
 		}
@@ -181,19 +180,19 @@ func regionName(disk *DiskInfo, region *Region) string {
 // server-push streaming (agent mode). This avoids per-chunk round trips.
 type StreamingBackend interface {
 	StreamCopyRegion(vw VDiskWriter, offset, length uint64, chunkSize uint32,
-		prog *Progress, diskSize uint64, tStart time.Time) error
+		prog *Progress, tStart time.Time) error
 }
 
 // copyRegion copies a contiguous disk range with auto-reconnect on network errors.
 func copyRegion(backend DiskBackend, vw VDiskWriter, offset, length uint64,
-	buf []byte, prog *Progress, diskSize uint64, tStart time.Time) error {
+	buf []byte, prog *Progress, tStart time.Time) error {
 
 	// Use streaming if the backend supports it
 	if sb, ok := backend.(StreamingBackend); ok {
-		return copyRegionStream(sb, backend, vw, offset, length, uint32(len(buf)), prog, diskSize, tStart)
+		return copyRegionStream(sb, backend, vw, offset, length, uint32(len(buf)), prog, tStart)
 	}
 
-	return copyRegionSerial(backend, vw, offset, length, buf, prog, diskSize, tStart)
+	return copyRegionSerial(backend, vw, offset, length, buf, prog, tStart)
 }
 
 // copyRegionStream uses the streaming protocol with auto-reconnect.
@@ -201,7 +200,7 @@ func copyRegion(backend DiskBackend, vw VDiskWriter, offset, length uint64,
 // whether it's a "network" error; if imaging isn't done, just retry.
 func copyRegionStream(sb StreamingBackend, backend DiskBackend, vw VDiskWriter,
 	offset, length uint64, chunkSize uint32,
-	prog *Progress, diskSize uint64, tStart time.Time) error {
+	prog *Progress, tStart time.Time) error {
 
 	curOff := offset
 	remaining := length
@@ -209,7 +208,7 @@ func copyRegionStream(sb StreamingBackend, backend DiskBackend, vw VDiskWriter,
 	for remaining > 0 {
 		savedTotalDone := prog.TotalDone
 
-		err := sb.StreamCopyRegion(vw, curOff, remaining, chunkSize, prog, diskSize, tStart)
+		err := sb.StreamCopyRegion(vw, curOff, remaining, chunkSize, prog, tStart)
 		if err == nil {
 			return nil
 		}
@@ -234,7 +233,7 @@ func copyRegionStream(sb StreamingBackend, backend DiskBackend, vw VDiskWriter,
 
 // copyRegionSerial is the original serial ReadAt loop (used by SFTP backend).
 func copyRegionSerial(backend DiskBackend, vw VDiskWriter, offset, length uint64,
-	buf []byte, prog *Progress, diskSize uint64, tStart time.Time) error {
+	buf []byte, prog *Progress, tStart time.Time) error {
 
 	remaining := length
 	curOff := offset
@@ -272,13 +271,13 @@ func copyRegionSerial(backend DiskBackend, vw VDiskWriter, offset, length uint64
 		prog.TotalDone += uint64(n)
 		prog.DataWritten += uint64(n)
 
-		printProgress(prog.TotalDone, diskSize, prog.DataWritten, tStart)
+		printProgress(prog.TotalDone, prog.TotalWork, prog.DataWritten, tStart)
 	}
 	return nil
 }
 
 func copyUsedOnly(backend DiskBackend, vw VDiskWriter, part *PartitionInfo,
-	buf []byte, prog *Progress, diskSize uint64, tStart time.Time) error {
+	buf []byte, prog *Progress, tStart time.Time) error {
 
 	// Swap: write zeros (sparse skip), no bitmap needed
 	if part.FSType == FSSwap {
@@ -286,7 +285,8 @@ func copyUsedOnly(backend DiskBackend, vw VDiskWriter, part *PartitionInfo,
 		if err := vw.WriteZero(part.Offset, part.Size); err != nil {
 			return err
 		}
-		prog.TotalDone += part.Size
+		// Swap doesn't transfer data — shrink TotalWork
+		prog.TotalWork -= part.Size
 		return nil
 	}
 
@@ -306,8 +306,12 @@ func copyUsedOnly(backend DiskBackend, vw VDiskWriter, part *PartitionInfo,
 		}
 	}
 	usedBytes := usedBlocks * blockSize
+	freeBytes := part.Size - usedBytes
 	fmt.Fprintf(os.Stderr, "    Bitmap: %d/%d blocks used (%s / %s, block_size=%d)\n",
 		usedBlocks, totalBlocks, FormatSize(usedBytes), FormatSize(part.Size), blockSize)
+
+	// Adjust TotalWork: subtract free bytes that won't be transferred
+	prog.TotalWork -= freeBytes
 
 	runStart := uint64(0)
 	inRun := false
@@ -323,15 +327,13 @@ func copyUsedOnly(backend DiskBackend, vw VDiskWriter, part *PartitionInfo,
 			if off+runLen > part.Offset+part.Size {
 				runLen = part.Offset + part.Size - off
 			}
-			if err := copyRegion(backend, vw, off, runLen, buf, prog, diskSize, tStart); err != nil {
+			if err := copyRegion(backend, vw, off, runLen, buf, prog, tStart); err != nil {
 				return err
 			}
 			inRun = false
 		}
 	}
 
-	freeBytes := part.Size - usedBytes
-	prog.TotalDone += freeBytes
 	return nil
 }
 
