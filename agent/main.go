@@ -13,6 +13,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
+	"sshimager/bitmap"
 	"sshimager/protocol"
 )
 
@@ -129,7 +130,7 @@ func runServe(in io.Reader, out io.Writer) error {
 			diskPath = req.DevPath
 
 			// Flush caches
-			execCmd("sh", "-c", fmt.Sprintf("sync && blockdev --flushbufs %s; sync", diskPath))
+			execCmd("sh", "-c", "sync ; echo 3 > /proc/sys/vm/drop_caches")
 
 			// Open the disk device
 			if diskFile != nil {
@@ -346,30 +347,34 @@ func handleStreamRead(w *bufio.Writer, defaultEnc *zstd.Encoder, disk *os.File, 
 }
 
 func handleBitmap(w *bufio.Writer, zenc *zstd.Encoder, disk *os.File, req *protocol.BitmapReq) {
-	var bitmapBits []byte
-	var blockSize uint32
-	var totalBlocks uint64
+	var bm *bitmap.BlockBitmap
 	var err error
 
 	switch req.FSType {
 	case protocol.FSExt2, protocol.FSExt3, protocol.FSExt4:
-		bitmapBits, blockSize, totalBlocks, err = readExt4Bitmap(disk, req.PartOffset, req.PartSize)
+		bm, err = bitmap.Ext4ReadBitmap(disk, req.PartOffset, req.PartSize)
 	case protocol.FSXFS:
-		bitmapBits, blockSize, totalBlocks, err = readXFSBitmap(disk, req.PartOffset, req.PartSize)
+		bm, err = bitmap.XFSReadBitmap(disk, req.PartOffset, req.PartSize)
 	case protocol.FSLVM:
-		bitmapBits, blockSize, totalBlocks, err = readLVMBitmap(disk, req.PartOffset, req.PartSize, req.DevPath)
+		bm, err = readLVMBitmap(disk, req.PartOffset, req.PartSize, req.DevPath)
 	case protocol.FSFat32:
-		bitmapBits, blockSize, totalBlocks, err = readFat32Bitmap(disk, req.PartOffset, req.PartSize)
+		bm, err = bitmap.Fat32ReadBitmap(disk, req.PartOffset, req.PartSize)
 	case protocol.FSNTFS:
-		bitmapBits, blockSize, totalBlocks, err = readNTFSBitmap(disk, req.PartOffset, req.PartSize)
+		bm, err = bitmap.NTFSReadBitmap(disk, req.PartOffset, req.PartSize)
 	case protocol.FSFat16:
-		bitmapBits, blockSize, totalBlocks, err = readFat16Bitmap(disk, req.PartOffset, req.PartSize)
+		bm, err = bitmap.Fat16ReadBitmap(disk, req.PartOffset, req.PartSize)
 	case protocol.FSSwap:
-		blockSize = 4096
-		totalBlocks = req.PartSize / uint64(blockSize)
-		bitmapBits = make([]byte, (totalBlocks+7)/8)
-		if len(bitmapBits) > 0 {
-			bitmapBits[0] = 1
+		blockSize := uint32(4096)
+		totalBlocks := req.PartSize / uint64(blockSize)
+		bitmapBytes := (totalBlocks + 7) / 8
+		bits := make([]byte, bitmapBytes)
+		if len(bits) > 0 {
+			bits[0] = 1
+		}
+		bm = &bitmap.BlockBitmap{
+			Bits:        bits,
+			BlockSize:   blockSize,
+			TotalBlocks: totalBlocks,
 		}
 	default:
 		protocol.WriteErrorResponse(w, fmt.Sprintf("unsupported fs type: %d", req.FSType))
@@ -381,7 +386,7 @@ func handleBitmap(w *bufio.Writer, zenc *zstd.Encoder, disk *os.File, req *proto
 		return
 	}
 
-	meta := encodeBitmapMeta(bitmapBits, blockSize, totalBlocks)
+	meta := bitmap.EncodeMeta(bm)
 
 	// Compress
 	compressed := zenc.EncodeAll(meta, nil)

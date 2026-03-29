@@ -1,4 +1,4 @@
-package main
+package bitmap
 
 import (
 	"encoding/binary"
@@ -6,17 +6,18 @@ import (
 	"io"
 )
 
-func readFat32Bitmap(r io.ReaderAt, partOffset, partSize uint64) ([]byte, uint32, uint64, error) {
+// Fat32ReadBitmap reads the FAT32 File Allocation Table to build a used-block bitmap.
+func Fat32ReadBitmap(r io.ReaderAt, partOffset, partSize uint64) (*BlockBitmap, error) {
 	bs := make([]byte, 512)
-	if err := readFullAt(r, bs, int64(partOffset)); err != nil {
-		return nil, 0, 0, fmt.Errorf("fat32: cannot read boot sector: %w", err)
+	if err := ReadFullAt(r, bs, int64(partOffset)); err != nil {
+		return nil, fmt.Errorf("fat32: cannot read boot sector: %w", err)
 	}
 
 	if bs[510] != 0x55 || bs[511] != 0xAA {
-		return nil, 0, 0, fmt.Errorf("fat32: bad boot signature")
+		return nil, fmt.Errorf("fat32: bad boot signature")
 	}
 	if string(bs[82:90]) != "FAT32   " {
-		return nil, 0, 0, fmt.Errorf("fat32: not a FAT32 filesystem")
+		return nil, fmt.Errorf("fat32: not a FAT32 filesystem")
 	}
 
 	bytesPerSec := binary.LittleEndian.Uint16(bs[11:13])
@@ -27,7 +28,7 @@ func readFat32Bitmap(r io.ReaderAt, partOffset, partSize uint64) ([]byte, uint32
 	fatSz32 := binary.LittleEndian.Uint32(bs[36:40])
 
 	if bytesPerSec == 0 || secPerClus == 0 || rsvdSecCnt == 0 || numFATs == 0 || fatSz32 == 0 {
-		return nil, 0, 0, fmt.Errorf("fat32: invalid BPB parameters")
+		return nil, fmt.Errorf("fat32: invalid BPB parameters")
 	}
 
 	clusterSize := uint32(bytesPerSec) * uint32(secPerClus)
@@ -41,7 +42,7 @@ func readFat32Bitmap(r io.ReaderAt, partOffset, partSize uint64) ([]byte, uint32
 		totalSec = uint64(binary.LittleEndian.Uint16(bs[19:21]))
 	}
 	if totalSec == 0 {
-		return nil, 0, 0, fmt.Errorf("fat32: zero total sectors")
+		return nil, fmt.Errorf("fat32: zero total sectors")
 	}
 
 	dataSectors := totalSec - dataStartSec
@@ -53,23 +54,24 @@ func readFat32Bitmap(r io.ReaderAt, partOffset, partSize uint64) ([]byte, uint32
 	}
 
 	bitmapBytes := (totalBlocks + 7) / 8
-	bits := make([]byte, bitmapBytes)
-
-	// Mark reserved + FAT area as used
-	dataStartBlock := dataStartSec * uint64(bytesPerSec) / uint64(clusterSize)
-	for b := uint64(0); b < dataStartBlock && b < totalBlocks; b++ {
-		bits[b/8] |= 1 << (b % 8)
+	bm := &BlockBitmap{
+		Bits:        make([]byte, bitmapBytes),
+		BlockSize:   clusterSize,
+		TotalBlocks: totalBlocks,
 	}
 
-	// Read FAT table
+	dataStartBlock := dataStartSec * uint64(bytesPerSec) / uint64(clusterSize)
+	for b := uint64(0); b < dataStartBlock && b < totalBlocks; b++ {
+		bm.Bits[b/8] |= 1 << (b % 8)
+	}
+
 	fatOffset := partOffset + fatStartSec*uint64(bytesPerSec)
 	fatSize := uint64(fatSz32) * uint64(bytesPerSec)
 	fat := make([]byte, fatSize)
-	if err := readFullAt(r, fat, int64(fatOffset)); err != nil {
-		return nil, 0, 0, fmt.Errorf("fat32: cannot read FAT: %w", err)
+	if err := ReadFullAt(r, fat, int64(fatOffset)); err != nil {
+		return nil, fmt.Errorf("fat32: cannot read FAT: %w", err)
 	}
 
-	// Walk FAT entries
 	for i := uint64(0); i < totalClusters; i++ {
 		fatIdx := i + 2
 		entryOff := fatIdx * 4
@@ -80,10 +82,10 @@ func readFat32Bitmap(r io.ReaderAt, partOffset, partSize uint64) ([]byte, uint32
 		if entry != 0 {
 			block := dataStartBlock + i
 			if block < totalBlocks {
-				bits[block/8] |= 1 << (block % 8)
+				bm.Bits[block/8] |= 1 << (block % 8)
 			}
 		}
 	}
 
-	return bits, clusterSize, totalBlocks, nil
+	return bm, nil
 }

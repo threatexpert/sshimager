@@ -16,6 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 
+	"sshimager/bitmap"
 	"sshimager/protocol"
 )
 
@@ -259,9 +260,9 @@ func launchAgent(conn *SSHConn) (*AgentBackend, error) {
 	return ab, nil
 }
 
-// PrepareDisk sends CmdPrepare to the agent (sync+flushbufs+open disk).
+// PrepareDisk sends CmdPrepare to the agent
 func (ab *AgentBackend) PrepareDisk(devPath string) error {
-	fmt.Fprintf(os.Stderr, "Preparing disk %s (sync + flushbufs)...\n", devPath)
+	fmt.Fprintf(os.Stderr, "Preparing disk %s (sync + drop_caches)...\n", devPath)
 	// Set DevPath on conn so GetDiskSize/GetDiskModel/ResolveMounts work
 	ab.conn.DevPath = devPath
 
@@ -348,7 +349,7 @@ func (ab *AgentBackend) ReadAt(p []byte, off int64) (int, error) {
 	}
 }
 
-func (ab *AgentBackend) GetBitmap(partOffset, partSize uint64, fsType FSType, devPath string) (*BlockBitmap, error) {
+func (ab *AgentBackend) GetBitmap(partOffset, partSize uint64, fsType FSType, devPath string) (*bitmap.BlockBitmap, error) {
 	// Map FSType to protocol byte
 	var fsByte byte
 	switch fsType {
@@ -402,7 +403,7 @@ func (ab *AgentBackend) GetBitmap(partOffset, partSize uint64, fsType FSType, de
 	totalBlocks := binary.LittleEndian.Uint64(data[4:12])
 	bits := data[12:]
 
-	return &BlockBitmap{
+	return &bitmap.BlockBitmap{
 		Bits:        bits,
 		BlockSize:   blockSize,
 		TotalBlocks: totalBlocks,

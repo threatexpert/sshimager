@@ -5,12 +5,14 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"sshimager/bitmap"
 )
 
 // LVInfo describes a logical volume on a PV partition
 type LVInfo struct {
-	Name       string // e.g. "cs-root"
-	DevPath    string // e.g. "/dev/mapper/cs-root"
+	Name        string // e.g. "cs-root"
+	DevPath     string // e.g. "/dev/mapper/cs-root"
 	StartSector uint64 // start sector on PV (from dmsetup table)
 	SizeSectors uint64 // size in sectors
 }
@@ -18,7 +20,7 @@ type LVInfo struct {
 // LVMBuildBitmap builds a combined bitmap for an LVM PV partition.
 // It discovers LVs via dmsetup table, opens each LV via SFTP to read
 // its filesystem bitmap, then maps used blocks back to PV physical offsets.
-func LVMBuildBitmap(conn *SSHConn, partOffset, partSize uint64, partDevPath string) (*BlockBitmap, error) {
+func LVMBuildBitmap(conn *SSHConn, partOffset, partSize uint64, partDevPath string) (*bitmap.BlockBitmap, error) {
 	// Get major:minor of the PV partition
 	statOut, err := conn.ExecCommand(fmt.Sprintf("stat -c '%%t:%%T' %s 2>/dev/null", partDevPath))
 	if err != nil {
@@ -74,7 +76,7 @@ func LVMBuildBitmap(conn *SSHConn, partOffset, partSize uint64, partDevPath stri
 	const blockSize = 4096
 	totalBlocks := partSize / blockSize
 	bitmapBytes := (totalBlocks + 7) / 8
-	bm := &BlockBitmap{
+	bm := &bitmap.BlockBitmap{
 		Bits:        make([]byte, bitmapBytes),
 		BlockSize:   blockSize,
 		TotalBlocks: totalBlocks,
@@ -118,7 +120,7 @@ func LVMBuildBitmap(conn *SSHConn, partOffset, partSize uint64, partDevPath stri
 }
 
 // readLVBitmap reads the bitmap of a filesystem inside an LV
-func readLVBitmap(r io.ReaderAt, lvSize uint64) (*BlockBitmap, error) {
+func readLVBitmap(r io.ReaderAt, lvSize uint64) (*bitmap.BlockBitmap, error) {
 	// Detect filesystem type
 	buf := make([]byte, 4096)
 	n, err := r.ReadAt(buf, 0)
@@ -131,14 +133,14 @@ func readLVBitmap(r io.ReaderAt, lvSize uint64) (*BlockBitmap, error) {
 		magic := uint16(buf[1024+56]) | uint16(buf[1024+57])<<8
 		if magic == 0xEF53 {
 			fmt.Fprintf(os.Stderr, "      LV fs: ext4\n")
-			return Ext4ReadBitmap(r, 0, lvSize)
+			return bitmap.Ext4ReadBitmap(r, 0, lvSize)
 		}
 	}
 
 	// XFS
 	if n >= 4 && string(buf[0:4]) == "XFSB" {
 		fmt.Fprintf(os.Stderr, "      LV fs: xfs (lvSize=%s)\n", FormatSize(lvSize))
-		return XFSReadBitmap(r, 0, lvSize)
+		return bitmap.XFSReadBitmap(r, 0, lvSize)
 	}
 
 	// Swap
@@ -150,7 +152,7 @@ func readLVBitmap(r io.ReaderAt, lvSize uint64) (*BlockBitmap, error) {
 			blockSize := uint32(4096)
 			totalBlocks := lvSize / uint64(blockSize)
 			bitmapBytes := (totalBlocks + 7) / 8
-			bm := &BlockBitmap{
+			bm := &bitmap.BlockBitmap{
 				Bits:        make([]byte, bitmapBytes),
 				BlockSize:   blockSize,
 				TotalBlocks: totalBlocks,
@@ -167,7 +169,7 @@ func readLVBitmap(r io.ReaderAt, lvSize uint64) (*BlockBitmap, error) {
 	return nil, fmt.Errorf("unknown filesystem in LV")
 }
 
-func markLVUsed(pvBitmap *BlockBitmap, lv LVInfo, blockSize uint32, partOffset uint64) {
+func markLVUsed(pvBitmap *bitmap.BlockBitmap, lv LVInfo, blockSize uint32, partOffset uint64) {
 	// LV's physical start on PV (in bytes from partition start)
 	lvPhysStart := lv.StartSector * 512
 	lvPhysEnd := lvPhysStart + lv.SizeSectors*512
@@ -182,7 +184,7 @@ func markLVUsed(pvBitmap *BlockBitmap, lv LVInfo, blockSize uint32, partOffset u
 	}
 }
 
-func mapLVBitmapToPV(pvBitmap *BlockBitmap, lvBitmap *BlockBitmap, lv LVInfo,
+func mapLVBitmapToPV(pvBitmap *bitmap.BlockBitmap, lvBitmap *bitmap.BlockBitmap, lv LVInfo,
 	pvBlockSize uint32, partOffset uint64) {
 
 	lvBlockSize := uint64(lvBitmap.BlockSize)

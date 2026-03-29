@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"sshimager/bitmap"
 )
 
 // SFTPBackend implements DiskBackend using the standard SFTP protocol.
@@ -21,20 +23,20 @@ func (b *SFTPBackend) ReadAt(p []byte, off int64) (int, error) {
 	return b.conn.ReadAt(p, off)
 }
 
-func (b *SFTPBackend) GetBitmap(partOffset, partSize uint64, fsType FSType, devPath string) (*BlockBitmap, error) {
+func (b *SFTPBackend) GetBitmap(partOffset, partSize uint64, fsType FSType, devPath string) (*bitmap.BlockBitmap, error) {
 	switch fsType {
 	case FSExt2, FSExt3, FSExt4:
-		return Ext4ReadBitmap(b.conn, partOffset, partSize)
+		return bitmap.Ext4ReadBitmap(b.conn, partOffset, partSize)
 	case FSXFS:
-		return XFSReadBitmap(b.conn, partOffset, partSize)
+		return bitmap.XFSReadBitmap(b.conn, partOffset, partSize)
 	case FSLVM:
 		return LVMBuildBitmap(b.conn, partOffset, partSize, devPath)
 	case FSFat32:
-		return Fat32ReadBitmap(b.conn, partOffset, partSize)
+		return bitmap.Fat32ReadBitmap(b.conn, partOffset, partSize)
 	case FSFat16:
-		return Fat16ReadBitmap(b.conn, partOffset, partSize)
+		return bitmap.Fat16ReadBitmap(b.conn, partOffset, partSize)
 	case FSNTFS:
-		return NTFSReadBitmap(b.conn, partOffset, partSize)
+		return bitmap.NTFSReadBitmap(b.conn, partOffset, partSize)
 	case FSSwap:
 		// Swap has no meaningful bitmap; caller handles this case
 		return nil, fmt.Errorf("swap partitions have no bitmap")

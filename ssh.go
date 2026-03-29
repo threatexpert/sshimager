@@ -266,10 +266,9 @@ func (c *SSHConn) launchSudoSFTP(sftpPath string) error {
 }
 
 // PrepareDisk flushes OS caches and device buffers before imaging.
-// Runs: sync && blockdev --flushbufs <dev>; sync
 func (c *SSHConn) PrepareDisk(devPath string) error {
-	fmt.Fprintf(os.Stderr, "Preparing disk %s (sync + flushbufs)...\n", devPath)
-	cmd := fmt.Sprintf("sh -c 'sync && blockdev --flushbufs %s; sync'", devPath)
+	fmt.Fprintf(os.Stderr, "Preparing disk %s (sync + drop_caches)...\n", devPath)
+	cmd := "sh -c 'sync ; echo 3 > /proc/sys/vm/drop_caches'"
 	_, err := c.ExecCommandSudo(cmd)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: disk prepare failed: %v (continuing anyway)\n", err)

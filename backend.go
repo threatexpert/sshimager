@@ -1,5 +1,7 @@
 package main
 
+import "sshimager/bitmap"
+
 // DiskBackend abstracts the remote disk access layer.
 // Two implementations exist:
 //   - SFTPBackend: uses standard sftp-server (existing behavior)
@@ -15,7 +17,7 @@ type DiskBackend interface {
 	// GetBitmap returns the block allocation bitmap for a partition.
 	// For SFTPBackend this reads the bitmap locally over SFTP.
 	// For AgentBackend this is computed server-side and sent compressed.
-	GetBitmap(partOffset, partSize uint64, fsType FSType, devPath string) (*BlockBitmap, error)
+	GetBitmap(partOffset, partSize uint64, fsType FSType, devPath string) (*bitmap.BlockBitmap, error)
 
 	// Reconnect re-establishes the connection using saved credentials.
 	// Returns nil on success. The caller may retry reads after reconnect.
