@@ -13,6 +13,8 @@ Remote Linux disk imaging over SSH. Creates VMDK/VHD/VDI/DD disk images from a r
 - **Non-root support** — automatically sets up `sudo sftp-server` when connected as a non-root user
 - **Auto-reconnect** — network interruptions during transfer are handled automatically with unlimited retry (backoff 1s → 60s), no manual intervention needed
 - **Interactive TUI** — terminal UI for disk selection and partition configuration, with mouse support
+- **Windows desktop GUI** — guided SSH connection, disk discovery, partition policy, output selection, live progress, logs, and cancellation
+- **Windows taskbar progress** — monitor imaging percentage and reconnect/error state while the application is minimised
 - **Cross-platform client** — runs on Windows and Linux (the client machine where images are saved)
 - **LVM aware** — reads LVM physical volume layout, parses dmsetup table to map logical volumes, builds combined bitmap across all LVs
 - **Swap handling** — swap partitions can be included (full copy for forensics) or excluded (used-only writes zeros)
@@ -40,6 +42,12 @@ Requires Go 1.24+.
 build.bat
 ```
 
+The Windows build uses Wails v2 and requires Node.js plus the Wails CLI for
+development. `build.bat` produces the desktop application at
+`build/bin/sshimager.exe`, copies a distribution copy to `bin/sshimager.exe`,
+builds `bin/sshimager-cli.exe` for Windows automation, and places the Linux
+agent binaries beside both GUI distributions.
+
 **Linux:**
 ```bash
 go mod tidy
@@ -47,6 +55,20 @@ go build -trimpath -ldflags="-s -w" -o sshimager .
 ```
 
 ## Usage
+
+### Windows desktop interface
+
+Run `sshimager.exe` without arguments. The interface guides you through:
+
+1. SSH connection and optional sudo credentials
+2. Remote physical disk selection
+3. Agent/SFTP transport and partition copy policies
+4. VMDK/VHD/VDI/DD output selection
+5. Live progress, speed, ETA, reconnect state, cancellation, and result handling
+
+For Windows automation, use the separately built `sshimager-cli.exe` with the
+existing command-line arguments. Linux continues to use the CLI/TUI workflow
+below.
 
 ### Interactive mode (recommended)
 

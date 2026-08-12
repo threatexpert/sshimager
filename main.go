@@ -42,7 +42,7 @@ Examples:
 `, Version)
 }
 
-func main() {
+func runCLI() {
 	var (
 		sshPort     int
 		output      string

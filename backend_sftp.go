@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -45,9 +46,9 @@ func (b *SFTPBackend) GetBitmap(partOffset, partSize uint64, fsType FSType, devP
 	}
 }
 
-func (b *SFTPBackend) Reconnect() error {
+func (b *SFTPBackend) Reconnect(ctx context.Context) error {
 	fmt.Fprintf(os.Stderr, "\nReconnecting (SFTP backend)...\n")
-	if err := b.conn.Reconnect(); err != nil {
+	if err := b.conn.Reconnect(ctx); err != nil {
 		return err
 	}
 	// Re-setup SFTP after SSH reconnect

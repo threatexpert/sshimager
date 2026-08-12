@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -60,7 +61,7 @@ func NewAgentBackend(conn *SSHConn) (*AgentBackend, error) {
 
 	// 4. Launch agent
 	ab, err := launchAgent(conn)
-	if err != nil && !conn.isRoot {
+	if err != nil && !conn.isRoot && conn.allowCredentialPrompt {
 		// Sudo password might be wrong — prompt for separate sudo password
 		fmt.Fprintf(os.Stderr, "Agent launch failed (sudo password may be wrong): %v\n", err)
 		fmt.Fprintf(os.Stderr, "[sudo] password for %s: ", conn.User)
@@ -433,6 +434,9 @@ func (ab *AgentBackend) StreamCopyRegion(vw VDiskWriter, offset, length uint64, 
 	curOff := offset
 
 	for {
+		if err := prog.err(); err != nil {
+			return err
+		}
 		hdr, err := protocol.ReadResponseHeader(ab.reader)
 		if err != nil {
 			return fmt.Errorf("stream read header at %d: %w", curOff, err)
@@ -455,7 +459,7 @@ func (ab *AgentBackend) StreamCopyRegion(vw VDiskWriter, offset, length uint64, 
 			curOff += n
 			prog.TotalDone += n
 			prog.DataWritten += n
-			printProgress(prog.TotalDone, prog.TotalWork, prog.DataWritten, tStart)
+			prog.report(tStart, false)
 
 		case protocol.StatusCompressed:
 			compressed := make([]byte, hdr.CompLen)
@@ -473,7 +477,7 @@ func (ab *AgentBackend) StreamCopyRegion(vw VDiskWriter, offset, length uint64, 
 			curOff += n
 			prog.TotalDone += n
 			prog.DataWritten += n
-			printProgress(prog.TotalDone, prog.TotalWork, prog.DataWritten, tStart)
+			prog.report(tStart, false)
 
 		case protocol.StatusZero:
 			// Zero region — sparse skip
@@ -484,7 +488,7 @@ func (ab *AgentBackend) StreamCopyRegion(vw VDiskWriter, offset, length uint64, 
 			curOff += n
 			prog.TotalDone += n
 			prog.DataWritten += n
-			printProgress(prog.TotalDone, prog.TotalWork, prog.DataWritten, tStart)
+			prog.report(tStart, false)
 
 		case protocol.StatusError:
 			msg := make([]byte, hdr.CompLen)
@@ -497,12 +501,12 @@ func (ab *AgentBackend) StreamCopyRegion(vw VDiskWriter, offset, length uint64, 
 	}
 }
 
-func (ab *AgentBackend) Reconnect() error {
+func (ab *AgentBackend) Reconnect(ctx context.Context) error {
 	fmt.Fprintf(os.Stderr, "\nReconnecting (Agent backend)...\n")
 	ab.closeInternal()
 
 	// Reconnect SSH
-	if err := ab.conn.Reconnect(); err != nil {
+	if err := ab.conn.Reconnect(ctx); err != nil {
 		return err
 	}
 

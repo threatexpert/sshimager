@@ -4,3 +4,14 @@ tmp/
 site/
 *.exe
 *.json
+
+!wails.json
+!frontend/package.json
+!frontend/package-lock.json
+!frontend/tsconfig.json
+!build/windows/info.json
+frontend/node_modules/
+frontend/wailsjs/
+frontend/package.json.md5
+frontend/dist/*
+!frontend/dist/.gitkeep

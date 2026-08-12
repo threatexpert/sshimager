@@ -1,6 +1,10 @@
 package main
 
-import "sshimager/bitmap"
+import (
+	"context"
+
+	"sshimager/bitmap"
+)
 
 // DiskBackend abstracts the remote disk access layer.
 // Two implementations exist:
@@ -21,7 +25,7 @@ type DiskBackend interface {
 
 	// Reconnect re-establishes the connection using saved credentials.
 	// Returns nil on success. The caller may retry reads after reconnect.
-	Reconnect() error
+	Reconnect(ctx context.Context) error
 
 	// IsNetworkError returns true if the error indicates a network
 	// disconnection that can be resolved by Reconnect().

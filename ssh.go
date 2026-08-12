@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,10 +27,11 @@ type SSHConn struct {
 	diskFile   *sftp.File
 
 	// Credentials for reconnect
-	password   string
-	sudoPass   string
-	authMethod ssh.AuthMethod
-	isRoot     bool
+	password              string
+	sudoPass              string
+	authMethod            ssh.AuthMethod
+	isRoot                bool
+	allowCredentialPrompt bool
 
 	// sudo sftp-server session
 	sudoSession *ssh.Session
@@ -39,6 +41,32 @@ type SSHConn struct {
 
 // NewSSHConn creates and connects to the remote host (without opening a disk).
 func NewSSHConn(userHost string, port int) (*SSHConn, error) {
+	conn := newSSHConn(userHost, port)
+	conn.allowCredentialPrompt = true
+
+	if err := conn.getCredentials(); err != nil {
+		return nil, err
+	}
+	if err := conn.connect(); err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+// NewSSHConnWithCredentials creates a connection without reading from the
+// terminal. It is used by graphical and other non-interactive clients.
+func NewSSHConnWithCredentials(userHost string, port int, password, sudoPassword string) (*SSHConn, error) {
+	conn := newSSHConn(userHost, port)
+	conn.password = password
+	conn.sudoPass = sudoPassword
+	conn.authMethod = ssh.Password(password)
+	if err := conn.connect(); err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+func newSSHConn(userHost string, port int) *SSHConn {
 	// Parse user@host
 	user := "root"
 	host := userHost
@@ -48,22 +76,10 @@ func NewSSHConn(userHost string, port int) (*SSHConn, error) {
 	}
 	host = fmt.Sprintf("%s:%d", host, port)
 
-	conn := &SSHConn{
+	return &SSHConn{
 		Host: host,
 		User: user,
 	}
-
-	// Get credentials
-	if err := conn.getCredentials(); err != nil {
-		return nil, err
-	}
-
-	// Connect
-	if err := conn.connect(); err != nil {
-		return nil, err
-	}
-
-	return conn, nil
 }
 
 func (c *SSHConn) getCredentials() error {
@@ -156,6 +172,9 @@ func (c *SSHConn) setupSudoSFTP() error {
 	}
 
 	// SSH password didn't work for sudo — ask for separate sudo password
+	if !c.allowCredentialPrompt {
+		return fmt.Errorf("sudo authentication failed; provide the correct sudo password")
+	}
 	fmt.Fprintf(os.Stderr, "SSH password did not work for sudo.\n")
 	fmt.Fprintf(os.Stderr, "[sudo] password for %s: ", c.User)
 	passBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -440,14 +459,20 @@ func (c *SSHConn) ExecCommandSudo(cmd string) (string, error) {
 
 // Reconnect re-establishes the SSH connection using saved credentials.
 // Only reconnects SSH itself — SFTP and disk reopen are handled by each backend.
-func (c *SSHConn) Reconnect() error {
+func (c *SSHConn) Reconnect(ctx context.Context) error {
 	fmt.Fprintf(os.Stderr, "\nReconnecting SSH...\n")
 	c.closeInternal()
 
 	// Retry with backoff
 	delays := []time.Duration{1, 2, 5, 10, 20, 30}
 	for i, delay := range delays {
-		time.Sleep(delay * time.Second)
+		timer := time.NewTimer(delay * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 		fmt.Fprintf(os.Stderr, "Reconnect attempt %d/%d...\n", i+1, len(delays))
 
 		if err := c.connect(); err != nil {

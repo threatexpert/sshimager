@@ -1,0 +1,19 @@
+{
+  "name": "sshimager-ui",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "5.2.4",
+    "typescript": "5.8.3",
+    "vite": "6.4.3",
+    "vue": "3.5.18",
+    "vue-tsc": "2.2.12"
+  },
+  "devDependencies": {}
+}
