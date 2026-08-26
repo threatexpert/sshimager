@@ -1,3 +1,5 @@
+English | [简体中文](README.zh-CN.md)
+
 # sshimager
 
 Remote Linux disk imaging over SSH. Creates VMDK/VHD/VDI/DD disk images from a remote Linux machine without installing anything on the target.
